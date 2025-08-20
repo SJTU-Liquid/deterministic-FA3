@@ -1169,3 +1169,8 @@ def test_flash3_bw_compatibility() -> None:
         "int attention_chunk=0, bool has_softcap=False, int num_splits=0, bool? pack_gqa=None, "
         "int sm_margin=0) -> Tensor"
     ))
+
+if __name__ == '__main__':
+    test_flash_attn_varlen_output(
+        seqlen_q = 8192, seqlen_k = 8192, d = 128, add_unused_qkv = False, causal = True, local = False, softcap = 0.0, deterministic = True, has_qv = False, mha_type = "mha", dtype = torch.bfloat16
+    )

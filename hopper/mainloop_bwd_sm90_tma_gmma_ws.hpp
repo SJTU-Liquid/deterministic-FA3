@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cuda/std/iterator>
 #include <cutlass/cutlass.h>
 #include <cutlass/array.h>
 #include <cutlass/numeric_types.h>
@@ -23,6 +24,8 @@
 #include "utils.h"
 #include "copy_sm90_bulk_reduce.hpp"
 
+#include "tile_m_scheduler.hpp"
+
 namespace flash {
 
 using namespace cute;
@@ -31,7 +34,7 @@ template <int Stages, int Stages_dO, int Stages_dS, class ClusterShape_, class T
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool Deterministic,
         bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
         int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-        bool Mma_dP_is_RS=false>
+        bool Mma_dP_is_RS=false, class MScheduler=DescendingScheduler>
 struct CollectiveMainloopBwdSm90 {
 
     static constexpr int kStages = Stages;
@@ -503,16 +506,16 @@ struct CollectiveMainloopBwdSm90 {
             }
         }
 
-        int m_block = m_block_max - 1;
+        MScheduler m_block(m_block_min, m_block_max);
 
         int lane_predicate = cute::elect_one_sync();
 
         if (lane_predicate) {
             pipeline_q.producer_acquire(smem_pipe_write);
             copy(params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-                 tQgQ(_, m_block), tQsQ(_, smem_pipe_write.index()));
+                 tQgQ(_, *m_block), tQsQ(_, smem_pipe_write.index()));
             copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)),
-                 gLSE(_, m_block), sLSE(_, smem_pipe_write.index()));
+                 gLSE(_, *m_block), sLSE(_, smem_pipe_write.index()));
         }
 
         // // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
@@ -525,22 +528,22 @@ struct CollectiveMainloopBwdSm90 {
             copy(params.tma_load_V.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0 /*mcast_mask*/), tVgV, tVsV);
 
             #pragma unroll (kHeadDim < 256 ? 2 : 1)
-            for (; m_block > m_block_min; --m_block) {
+            for (; cuda::std::next(m_block) != m_block.end(); ++m_block) {
                 // If Q and dO have the same number of stages, we can use the same pipeline state variable
                 // to reduce registers
                 PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
                 pipeline_do.producer_acquire(smem_pipe_write_do_cur);
                 copy(params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-                     tdOgdO(_, m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
+                     tdOgdO(_, *m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
                 copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)),
-                     gdPsum(_, m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
+                     gdPsum(_, *m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
                 if constexpr (!Q_dO_same_stages) { ++smem_pipe_write_do; }
                 ++smem_pipe_write;
                 pipeline_q.producer_acquire(smem_pipe_write);
                 copy(params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-                     tQgQ(_, m_block - 1), tQsQ(_, smem_pipe_write.index()));
+                     tQgQ(_, *cuda::std::next(m_block)), tQsQ(_, smem_pipe_write.index()));
                 copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)),
-                     gLSE(_, m_block - 1), sLSE(_, smem_pipe_write.index()));
+                     gLSE(_, *cuda::std::next(m_block)), sLSE(_, smem_pipe_write.index()));
             }
         }
         scheduler_prefetch();
@@ -548,9 +551,9 @@ struct CollectiveMainloopBwdSm90 {
             PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
             pipeline_do.producer_acquire(smem_pipe_write_do_cur);
             copy(params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
-                 tdOgdO(_, m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
+                 tdOgdO(_, *m_block), tdOsdO(_, smem_pipe_write_do_cur.index()));
             copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)),
-                 gdPsum(_, m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
+                 gdPsum(_, *m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
             if constexpr (!Q_dO_same_stages) { ++smem_pipe_write_do; }
             ++smem_pipe_write;
         }
@@ -625,28 +628,29 @@ struct CollectiveMainloopBwdSm90 {
         int *lock_ptr = !Deterministic ? nullptr : params.dq_semaphore + bidb * num_head + bidh;
         using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
         bool const lane_predicate = cute::elect_one_sync();
-        int m_block = m_block_max - 1;
+        MScheduler m_block(m_block_min, m_block_max);
 
-        if constexpr (Is_local && Deterministic) {
-            constexpr int kBlockM = get<0>(TileShape_MNK{});
-            int const m_block_global_max = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
-            m_block = m_block_global_max;
-            #pragma unroll 2
-            for (; m_block >= m_block_max; --m_block) {
-                Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, m_block * num_batch * num_head);
-            }
-        }
+        // TOOD: fix this
+        // if constexpr (Is_local && Deterministic) {
+        //     constexpr int kBlockM = get<0>(TileShape_MNK{});
+        //     int const m_block_global_max = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
+        //     m_block = m_block_global_max;
+        //     #pragma unroll 2
+        //     for (; m_block >= m_block_max; --m_block) {
+        //         Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, m_block * num_batch * num_head);
+        //     }
+        // }
 
         #pragma unroll 2
-        for (; m_block >= m_block_min; --m_block) {
+        for (; m_block != m_block.end(); ++m_block) {
             if constexpr (Deterministic) {
-                Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, m_block * num_batch * num_head, n_block);
+                Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, (*m_block) * num_batch * num_head, n_block);
             }
             #pragma unroll
             for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
                 cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx /*id*/);  // sdQ full, to be written to gmem
                 if (lane_predicate) {
-                    SM90_BULK_REDUCE_ADD::copy(raw_pointer_cast(sdQ(_, warpgroup_idx).data()), raw_pointer_cast(gdQaccum(_, warpgroup_idx, m_block).data()), dQ_TMA_num_bytes, static_cast<uint64_t>(TMA::CacheHintSm90::EVICT_LAST));
+                    SM90_BULK_REDUCE_ADD::copy(raw_pointer_cast(sdQ(_, warpgroup_idx).data()), raw_pointer_cast(gdQaccum(_, warpgroup_idx, *m_block).data()), dQ_TMA_num_bytes, static_cast<uint64_t>(TMA::CacheHintSm90::EVICT_LAST));
                     tma_store_arrive();
                 }
             }
@@ -656,7 +660,7 @@ struct CollectiveMainloopBwdSm90 {
                 cutlass::arch::NamedBarrier::arrive(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/);  // sdQ empty, ready to be written to
             });
             if constexpr (Deterministic) {
-                Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, m_block * num_batch * num_head);
+                Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, (*m_block) * num_batch * num_head);
             }
         }
         
@@ -809,7 +813,7 @@ struct CollectiveMainloopBwdSm90 {
             params.attention_chunk_divmod, params.qhead_per_khead_divmod
         );
 
-        int m_block = m_block_max - 1;
+        MScheduler m_block(m_block_min, m_block_max);
 
         clear(tdKrdK);
         clear(tdVrdV);
@@ -1004,32 +1008,25 @@ struct CollectiveMainloopBwdSm90 {
         int const m_block_max_before_local_mask = !Is_local || !SeparateMaskingIterations
             ? m_block_max
             : std::min(m_block_max, (n_block * kBlockN + seqlen_q - seqlen_k + params.window_size_left) / kBlockM);
-        if constexpr (Is_local && SeparateMaskingIterations) {
-            auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
-            CUTLASS_PRAGMA_NO_UNROLL
-            for (; m_block >= m_block_max_before_local_mask; --m_block) {
-                bwd_step(m_block, mask_fn);
-            }
-        }
 
         int const m_block_min_stage2 = ((Is_causal || Is_local) && SeparateMaskingIterations)
                                         ? std::min(m_block_max, ((n_block + 1) * kBlockN - 1 + seqlen_q - seqlen_k - params.window_size_right) / kBlockM + 1) - 1
                                         : m_block_min;
 
-        auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal && !SeparateMaskingIterations, Is_local && !SeparateMaskingIterations>(tSrS, m_block, n_block); };
         CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block >= m_block_min_stage2; --m_block) {
-            bwd_step(m_block, mask_fn);
-        }
-
-        if constexpr ((Is_causal || Is_local) && SeparateMaskingIterations) {
-            auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
-            CUTLASS_PRAGMA_NO_UNROLL
-            for (; m_block >= m_block_min; --m_block) {
-                bwd_step(m_block, mask_fn);
+        for (; m_block != m_block.end(); ++m_block) {
+            if (Is_local && SeparateMaskingIterations && *m_block >= m_block_max_before_local_mask) {
+                auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
+                bwd_step(*m_block, mask_fn);
+            } else if ((Is_causal || Is_local) && SeparateMaskingIterations && *m_block < m_block_min_stage2) {
+                auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal, Is_local>(tSrS, m_block, n_block); };
+                bwd_step(*m_block, mask_fn);
+            } else {
+                auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, Is_causal && !SeparateMaskingIterations, Is_local && !SeparateMaskingIterations>(tSrS, m_block, n_block); };
+                bwd_step(*m_block, mask_fn);
             }
         }
-
+ 
         // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
         #pragma unroll
         for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) *= params.softmax_scale; }
