@@ -25,6 +25,7 @@
 #include "copy_sm90_bulk_reduce.hpp"
 
 #include "tile_m_scheduler.hpp"
+#include "tile_m_dependency.hpp"
 
 namespace flash {
 
@@ -34,7 +35,7 @@ template <int Stages, int Stages_dO, int Stages_dS, class ClusterShape_, class T
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool Deterministic,
         bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
         int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-        bool Mma_dP_is_RS=false, class MScheduler=DescendingScheduler>
+        bool Mma_dP_is_RS=false, class MScheduler=ShiftScheduler, class MDependency=ShiftDependency>
 struct CollectiveMainloopBwdSm90 {
 
     static constexpr int kStages = Stages;
@@ -412,6 +413,30 @@ struct CollectiveMainloopBwdSm90 {
                 args.cu_seqlens_q, args.cu_seqlens_k, args.seqused_q, args.seqused_k};
     }
 
+    // calculate the kv tile status (for current head): how many kv tiles are active? how many done?
+    // return: (running_count, finished_count)
+    CUTLASS_DEVICE
+    auto get_kv_status(int num_sms, int kv_id, int bidh, int bidb, int num_kv_tiles, int num_heads) {
+        int linear_id = kv_id + bidh * num_kv_tiles + bidb * num_kv_tiles * num_heads;
+        int wave_id = linear_id / num_sms;
+
+        // start and end indices for the current head
+        int start_idx_my_head = bidh * num_kv_tiles + bidb * num_kv_tiles * num_heads;
+        int end_idx_my_head = start_idx_my_head + num_kv_tiles - 1;
+
+        // start and end indices for the current wave
+        int start_idx_wave = wave_id * num_sms;
+        int end_idx_wave = start_idx_wave + num_sms - 1;
+
+        int intersection_start = max(start_idx_my_head, start_idx_wave);
+        int intersection_end = min(end_idx_my_head, end_idx_wave);
+        int running_count = max(0, intersection_end - intersection_start + 1);
+
+        int finished_count = max(0, start_idx_wave - start_idx_my_head);
+
+        return std::make_tuple(running_count, finished_count);
+    }
+
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
     CUTLASS_DEVICE
     static void prefetch_tma_descriptors(Params const& params) {
@@ -430,7 +455,8 @@ struct CollectiveMainloopBwdSm90 {
          PipelineState_dO& smem_pipe_write_do,
          SharedStorage &shared_storage,
          SchedulerPrefetch const& scheduler_prefetch,
-         cute::tuple<int32_t, int32_t, int32_t> block_coord
+         cute::tuple<int32_t, int32_t, int32_t> block_coord,
+         int num_sms = 132
          ) {
 
         auto [n_block, bidh, bidb] = block_coord;
@@ -506,7 +532,11 @@ struct CollectiveMainloopBwdSm90 {
             }
         }
 
-        MScheduler m_block(m_block_min, m_block_max);
+        // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
+        auto [running_count, finished_count] = get_kv_status(
+            num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+        );
+        MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
 
         int lane_predicate = cute::elect_one_sync();
 
@@ -528,7 +558,7 @@ struct CollectiveMainloopBwdSm90 {
             copy(params.tma_load_V.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0 /*mcast_mask*/), tVgV, tVsV);
 
             #pragma unroll (kHeadDim < 256 ? 2 : 1)
-            for (; cuda::std::next(m_block) != m_block.end(); ++m_block) {
+            for (; cuda::std::next(m_block).valid(); ++m_block) {
                 // If Q and dO have the same number of stages, we can use the same pipeline state variable
                 // to reduce registers
                 PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
@@ -597,7 +627,8 @@ struct CollectiveMainloopBwdSm90 {
     CUTLASS_DEVICE void
     store_dq(Params const& params,
              SharedStorage &shared_storage,
-             cute::tuple<int32_t, int32_t, int32_t> block_coord
+             cute::tuple<int32_t, int32_t, int32_t> block_coord,
+             int num_sms = 132
              ) {
         if constexpr (!dQacc_use_TMA) { return; }
 
@@ -628,7 +659,11 @@ struct CollectiveMainloopBwdSm90 {
         int *lock_ptr = !Deterministic ? nullptr : params.dq_semaphore + bidb * num_head + bidh;
         using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
         bool const lane_predicate = cute::elect_one_sync();
-        MScheduler m_block(m_block_min, m_block_max);
+        // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
+        auto [running_count, finished_count] = get_kv_status(
+            num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+        );
+        MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
 
         // TOOD: fix this
         // if constexpr (Is_local && Deterministic) {
@@ -642,9 +677,14 @@ struct CollectiveMainloopBwdSm90 {
         // }
 
         #pragma unroll 2
-        for (; m_block != m_block.end(); ++m_block) {
+        for (; m_block.valid(); ++m_block) {
             if constexpr (Deterministic) {
-                Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, (*m_block) * num_batch * num_head, n_block);
+                // now only one head per wave, should be changed later
+                int wait_num = MDependency()(*m_block, n_block - finished_count, running_count, finished_count);
+                // if (threadIdx.x % 32  == 0 && finished_count == 4) {
+                //     printf("m_block: %d,n_block: %d, wait_num: %d, blockidx: %d\n", *m_block, n_block, wait_num, blockIdx.x);
+                // }
+                Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, (*m_block) * num_batch * num_head, wait_num);
             }
             #pragma unroll
             for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
@@ -691,7 +731,8 @@ struct CollectiveMainloopBwdSm90 {
         int thread_idx,
         int &work_idx,
         cute::tuple<int32_t, int32_t, int32_t> block_coord,
-        SharedStorage& shared_storage
+        SharedStorage& shared_storage,
+        int num_sms = 132
         ) {
         static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
@@ -813,7 +854,14 @@ struct CollectiveMainloopBwdSm90 {
             params.attention_chunk_divmod, params.qhead_per_khead_divmod
         );
 
-        MScheduler m_block(m_block_min, m_block_max);
+        // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
+        auto [running_count, finished_count] = get_kv_status(
+            num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+        );
+        MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+        // if (thread_idx == 0) {
+        //     printf("total kv: %d, m_max: %d, block: (%d, %d, %d) running_kv: %d, finished_kv: %d\n", gridDim.x, m_block_max, blockIdx.x, blockIdx.y, blockIdx.z,running_count, finished_count);
+        // }
 
         clear(tdKrdK);
         clear(tdVrdV);
@@ -1014,7 +1062,7 @@ struct CollectiveMainloopBwdSm90 {
                                         : m_block_min;
 
         CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block != m_block.end(); ++m_block) {
+        for (; m_block.valid(); ++m_block) {
             if (Is_local && SeparateMaskingIterations && *m_block >= m_block_max_before_local_mask) {
                 auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/, false /*Causal_mask*/, Is_local>(tSrS, m_block, n_block); };
                 bwd_step(*m_block, mask_fn);
@@ -1026,6 +1074,10 @@ struct CollectiveMainloopBwdSm90 {
                 bwd_step(*m_block, mask_fn);
             }
         }
+
+        // if (thread_idx == 0) {
+        //     printf("block: (%d, %d, %d) finished\n", blockIdx.x, blockIdx.y, blockIdx.z);
+        // }
  
         // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
         #pragma unroll
