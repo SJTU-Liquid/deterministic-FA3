@@ -704,6 +704,95 @@ public:
 
 };
 
+class CausalBwdChunkScheduler {
+public:
+
+    using SharedStorage = int;
+    static const int kvChunkSize = 2;
+    static_assert(kvChunkSize % 2 == 0, "kvChunkSize must be even");
+    struct Params {
+        int total_blocks;
+        int num_m_blocks;
+        int num_chunks; // 总的任务块数量
+        cutlass::FastDivmod m_block_divmod, head_divmod;
+    };
+
+    static Params
+    to_underlying_arguments(TileSchedulerArguments const& args) {
+        int total_blocks = args.num_blocks * args.num_head * args.num_batch;
+        assert(args.num_blocks % kvChunkSize == 0);
+        return {total_blocks,
+                args.num_blocks,
+                total_blocks / kvChunkSize,
+                cutlass::FastDivmod(args.num_blocks),
+                cutlass::FastDivmod(args.num_head)};
+    }
+
+    static dim3
+    get_grid_shape(Params const& params, int num_sm) {
+        // 启动的 SM 数量不应超过总的任务块数量
+        return {uint32_t(std::min(params.num_chunks, num_sm))};
+    }
+
+    // WorkTileInfo 现在代表一个任务块的开始
+    struct WorkTileInfo {
+        int tile_idx;
+
+        CUTLASS_DEVICE
+        bool
+        is_valid(Params const& params) const {
+            // 只要块的起始索引有效，这个块就值得处理
+            return tile_idx < params.total_blocks;
+        }
+        
+        CUTLASS_DEVICE
+        cute::tuple<int32_t, int32_t, int32_t, int32_t>
+        get_block_coord(Params const& params) const {
+            int block, bidh, bidb;
+            bidb = params.head_divmod.divmod(bidh, params.m_block_divmod.divmod(block, tile_idx));
+            if (block % 2 != 0) {
+                block = params.num_m_blocks - 1 - block / 2;
+            } else {
+                block = block / 2;
+            }
+            return {block, bidh, bidb, 0 /*split_idx*/};
+        }
+    };
+
+    CUTLASS_DEVICE
+    CausalBwdChunkScheduler(SharedStorage* const smem_scheduler) {};
+
+    template<bool IsProducerWarp=false>
+    CUTLASS_DEVICE
+    WorkTileInfo
+    get_initial_work(Params const& params) const {
+        // 每个 SM 领取一个任务块，块的 ID 就是 blockIdx.x
+        // 块的起始 tile_idx 是 blockIdx.x * kvChunkSize
+        return {int(blockIdx.x) * kvChunkSize};
+    }
+
+    CUTLASS_DEVICE
+    void
+    init_consumer() const {}
+
+    CUTLASS_DEVICE
+    void
+    prefetch_next_work(Params const& params, WorkTileInfo& current_work) const {}
+
+    template<bool IsProducerWarp=false>
+    CUTLASS_DEVICE
+    WorkTileInfo
+    get_next_work(Params const& params, WorkTileInfo const& current_work) const {
+        if (current_work.tile_idx % kvChunkSize != kvChunkSize - 1) {
+            return {current_work.tile_idx + 1};
+        } else {
+            int current_chunk_start_idx = current_work.tile_idx - (kvChunkSize - 1);
+            return {current_chunk_start_idx + int(gridDim.x) * kvChunkSize};
+        }
+    }
+};
+
+
 ///////////////////////////////////////////////////////////////////////////////
 
 } // flash

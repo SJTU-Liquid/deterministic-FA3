@@ -1173,4 +1173,4 @@ def test_flash3_bw_compatibility() -> None:
 
 
 if __name__ == "__main__":
-    test_flash_attn_output(seqlen_q=8192, seqlen_k=8192, d = 128, causal=False, local=False, softcap = 0.0, V_colmajor=False, deterministic=True, has_qv = False, mha_type="mha", dtype=torch.bfloat16)
+    test_flash_attn_output(seqlen_q=8192, seqlen_k=8192, d = 128, causal=True, local=False, softcap = 0.0, V_colmajor=False, deterministic=True, has_qv = False, mha_type="mha", dtype=torch.bfloat16)

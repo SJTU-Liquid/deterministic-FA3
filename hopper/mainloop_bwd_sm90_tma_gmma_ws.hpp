@@ -35,7 +35,7 @@ template <int Stages, int Stages_dO, int Stages_dS, class ClusterShape_, class T
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool Deterministic,
         bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
         int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-        bool Mma_dP_is_RS=false, class MScheduler=ShiftScheduler, class MDependency=ShiftDependency>
+        bool Mma_dP_is_RS=false, class MScheduler=DescendingScheduler, class MDependency=NaiveDependency>
 struct CollectiveMainloopBwdSm90 {
 
     static constexpr int kStages = Stages;
@@ -548,8 +548,8 @@ struct CollectiveMainloopBwdSm90 {
                  gLSE(_, *m_block), sLSE(_, smem_pipe_write.index()));
         }
 
-        // // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
-        // cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+        // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
 
         if (lane_predicate) {
             // Copy K tile and V tile from GMEM to SMEM.
@@ -709,8 +709,8 @@ struct CollectiveMainloopBwdSm90 {
     CUTLASS_DEVICE void
     mma_init() {
         // We're not currently using this bc we're not using persistent scheduler
-        // // Tell producer (warp 0) that smem_k and smem_v are ready
-        // cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+        // Tell producer (warp 0) that smem_k and smem_v are ready
+        cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
         int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
         if constexpr (dQacc_use_TMA) {
             if (warp_idx_in_warpgroup == 0) {
