@@ -304,10 +304,11 @@ for headdim in [128]:
             page_table = rearrange(torch.arange(batch_size * seqlen // page_size, device=device, dtype=torch.int32),
                                    "(b s) -> b s", s=seqlen // page_size)
         else:
+
             page_table = None
 
-        # for causal in [False, True]:
-        for causal in [False]:
+        for causal in [True]:
+        # for causal in [False]:
             for deterministic in [False, True]:
                 print(f"\n### {headdim = }, {causal = }, {seqlen = }, {deterministic = } ###")
                 nFLOPS = flops(batch_size, nheads, seqlen_q, seqlen, headdim if not has_qv else headdim + headdim_v, headdim_v, causal=causal, window_size=window_size)

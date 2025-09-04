@@ -35,7 +35,7 @@ template <int Stages, int Stages_dO, int Stages_dS, class ClusterShape_, class T
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool Deterministic,
         bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
         int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-        bool Mma_dP_is_RS=false, class MScheduler=DescendingScheduler, class MDependency=NaiveDependency>
+        bool Mma_dP_is_RS=false, class MScheduler=ShiftCausalScheduler, class MDependency=ShiftCausalDependency>
 struct CollectiveMainloopBwdSm90 {
 
     static constexpr int kStages = Stages;
@@ -532,11 +532,31 @@ struct CollectiveMainloopBwdSm90 {
             }
         }
 
+        int nheads = get<2>(params.shape_Q);
+        int batches = get<3>(params.shape_Q);
+        int kv_len = get<0>(params.shape_K);
+        int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
         // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
         auto [running_count, finished_count] = get_kv_status(
-            num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+            num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
         );
-        MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+
+        // get_kv_status(
+        //     num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+        // );
+        // MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+        // static_assert((!Is_causal) || kBlockN % kBlockM == 0, "kBlockN must be multiple of kBlockM for causal");
+        int stage = n_block > n_blocks - 1 - n_block; // 0: big side(n_block < half), 1: small side(>= half)
+        int stride = kBlockN / kBlockM;
+        int sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
+        int global_m_min;
+        if (stage == 0) {
+            global_m_min = m_block_min - (sm_id * stride);
+        } else {
+            // don't need global_m_min, so we just set it to 0
+            global_m_min = 0;
+        }
+        MScheduler m_block(m_block_min, m_block_max, running_count, sm_id, stage, stride, global_m_min);
 
         int lane_predicate = cute::elect_one_sync();
 
@@ -659,11 +679,30 @@ struct CollectiveMainloopBwdSm90 {
         int *lock_ptr = !Deterministic ? nullptr : params.dq_semaphore + bidb * num_head + bidh;
         using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
         bool const lane_predicate = cute::elect_one_sync();
+
+        int nheads = get<2>(params.shape_Q);
+        int batches = get<3>(params.shape_Q);
+        int kv_len = get<0>(params.shape_K);
+        int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
         // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
         auto [running_count, finished_count] = get_kv_status(
-            num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+            num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
         );
-        MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+        // auto [running_count, finished_count] = get_kv_status(
+        //     num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+        // );
+        // MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+        int stage = n_block > n_blocks - 1 - n_block; // 0: big side(n_block < half), 1: small side(>= half)
+        int stride = kBlockN / kBlockM;
+        int sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
+        int global_m_min;
+        if (stage == 0) {
+            global_m_min = m_block_min- (sm_id * stride);
+        } else {
+            // don't need global_m_min, so we just set it to 0
+            global_m_min = 0;
+        }
+        MScheduler m_block(m_block_min, m_block_max, running_count, sm_id, stage, stride, global_m_min);
 
         // TOOD: fix this
         // if constexpr (Is_local && Deterministic) {
@@ -680,9 +719,11 @@ struct CollectiveMainloopBwdSm90 {
         for (; m_block.valid(); ++m_block) {
             if constexpr (Deterministic) {
                 // now only one head per wave, should be changed later
-                int wait_num = MDependency()(*m_block, n_block - finished_count, running_count, finished_count);
-                // if (threadIdx.x % 32  == 0 && finished_count == 4) {
-                //     printf("m_block: %d,n_block: %d, wait_num: %d, blockidx: %d\n", *m_block, n_block, wait_num, blockIdx.x);
+                // int wait_num = MDependency()(*m_block, n_block - finished_count, running_count, finished_count);
+                int finished_kv_count = finished_count + max(0, finished_count - (m_block_max - *m_block - 1) / stride);
+                int wait_num = MDependency()(m_block, running_count, finished_kv_count, stride);
+                // if (threadIdx.x % 32  == 0) {
+                //     printf("m_block: %d, wait_num: %d, blockidx: %d total kv: %d, m_min: %d, m_max: %d, block: (%d, %d, %d) running_kv: %d, finished_kv: %d\n", *m_block, wait_num, blockIdx.x, n_blocks, m_block_min, m_block_max, n_block, bidh, bidb, running_count, finished_count);
                 // }
                 Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, (*m_block) * num_batch * num_head, wait_num);
             }
@@ -855,12 +896,32 @@ struct CollectiveMainloopBwdSm90 {
         );
 
         // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
+        int nheads = get<2>(params.shape_Q);
+        int batches = get<3>(params.shape_Q);
+        int kv_len = get<0>(params.shape_K);
+        int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
+        // TODO: change gridDim.x to a more general way, currently we assume non-persistent execution
         auto [running_count, finished_count] = get_kv_status(
-            num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+            num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
         );
-        MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+
+        // auto [running_count, finished_count] = get_kv_status(
+        //     num_sms, n_block, bidh, bidb, gridDim.x, gridDim.y
+        // );
+        // MScheduler m_block(m_block_min, m_block_max, n_block - finished_count);
+        int stage = n_block > n_blocks - 1 - n_block; // 0: big side(n_block < half), 1: small side(>= half)
+        int stride = kBlockN / kBlockM;
+        int sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
+        int global_m_min;
+        if (stage == 0) {
+            global_m_min = m_block_min- (sm_id * stride);
+        } else {
+            // don't need global_m_min, so we just set it to 0
+            global_m_min = 0;
+        }
+        MScheduler m_block(m_block_min, m_block_max, running_count, sm_id, stage, stride, global_m_min);
         // if (thread_idx == 0) {
-        //     printf("total kv: %d, m_max: %d, block: (%d, %d, %d) running_kv: %d, finished_kv: %d\n", gridDim.x, m_block_max, blockIdx.x, blockIdx.y, blockIdx.z,running_count, finished_count);
+        //     printf("total kv: %d, m_min: %d, m_max: %d, block: (%d, %d, %d) running_kv: %d, finished_kv: %d, nhead: %d\n", n_blocks, m_block_min, m_block_max, n_block, bidh, bidb, running_count, finished_count, nheads);
         // }
 
         clear(tdKrdK);
