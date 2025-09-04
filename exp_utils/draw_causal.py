@@ -8,8 +8,8 @@ seq_lengths = np.arange(len(seq_lengths_labels))
 
 # 优化后的 TFLOPS 数据
 optimized = {
-    'bs2': [393.8, 438.0, 460.2],
-    'bs1': [372.6, 437.4, 458.6]
+    'bs2': [405.7, 450.6, 469.3],
+    'bs1': [388.7, 450.0, 472.2]
 }
 
 # 优化前的 TFLOPS 数据
