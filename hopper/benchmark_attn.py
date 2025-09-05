@@ -307,7 +307,7 @@ for headdim in [128]:
 
             page_table = None
 
-        for causal in [True]:
+        for causal in [False, True]:
         # for causal in [False]:
             for deterministic in [False, True]:
                 print(f"\n### {headdim = }, {causal = }, {seqlen = }, {deterministic = } ###")
