@@ -23,7 +23,7 @@ namespace flash {
         using pointer           = const int*;
         using reference         = const int&;
 
-        CUTLASS_DEVICE AscendingScheduler(int m_min, int m_max, int active_kv_idx)
+        CUTLASS_DEVICE AscendingScheduler(int m_min, int m_max)
             : m_current(m_min), m_end(m_max) {}
 
         CUTLASS_DEVICE bool valid() const {
@@ -51,7 +51,7 @@ namespace flash {
         using pointer           = const int*;
         using reference         = const int&;
 
-        CUTLASS_DEVICE DescendingScheduler(int m_min, int m_max, int active_kv_idx)
+        CUTLASS_DEVICE DescendingScheduler(int m_min, int m_max)
             : m_current(m_max - 1), m_end(m_min - 1) {}
 
         CUTLASS_DEVICE bool valid() const {

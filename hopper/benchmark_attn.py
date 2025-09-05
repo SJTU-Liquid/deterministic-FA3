@@ -239,7 +239,8 @@ headdim = 256
 # bs_seqlen_vals = [(16, 1024), (8, 2048), (4, 4096), (2, 8192), (1, 16384)]
 # bs_seqlen_vals = [(32, 512), (16, 1024)]
 # bs_seqlen_vals = [(2, 64 * 132)]
-bs_seqlen_vals = [(2, 16384), (2, 8192), (2, 4096), (1, 16384), (1, 8192), (1, 4096)]
+bs_seqlen_vals = [(2**(14 - log_seqlen), 2**log_seqlen) for log_seqlen in range(9, 15)]
+# bs_seqlen_vals = [(2, 16384), (2, 8192), (2, 4096), (1, 16384), (1, 8192), (1, 4096)]
 # bs_seqlen_vals = [(1, 16 * 1024)]
 time_f = {}
 time_b = {}
@@ -250,7 +251,7 @@ time_b = {}
 # for headdim in [64, 96, 128]:
 # for headdim in [64, 128, 256]:
 # for headdim in [64, 96, 128, 192, 256]:
-for headdim in [128]:
+for headdim in [64, 128]:
     nheads = dim // headdim
     # nheads = 128
     # headdim = 64
@@ -309,7 +310,7 @@ for headdim in [128]:
 
         for causal in [False, True]:
         # for causal in [False]:
-            for deterministic in [False, True]:
+            for deterministic in [True]:
                 print(f"\n### {headdim = }, {causal = }, {seqlen = }, {deterministic = } ###")
                 nFLOPS = flops(batch_size, nheads, seqlen_q, seqlen, headdim if not has_qv else headdim + headdim_v, headdim_v, causal=causal, window_size=window_size)
                 if cudnn is not None:

@@ -13,8 +13,8 @@ namespace flash {
     // the original dependency order
     class NaiveDependency {
     public:
-        CUTLASS_DEVICE int operator()(int q_id, int active_kv_id, int active_kv_tiles, int executed_kv_tiles) const {
-            return active_kv_id + executed_kv_tiles;
+        CUTLASS_DEVICE int operator()(int kv_id) const {
+            return kv_id;
         }
     };
 

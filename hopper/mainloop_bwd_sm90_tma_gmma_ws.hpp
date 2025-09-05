@@ -31,11 +31,13 @@ namespace flash {
 
 using namespace cute;
 
+template <typename T>
+constexpr bool always_false_v = false;
 template <int Stages, int Stages_dO, int Stages_dS, class ClusterShape_, class TileShape_MNK_, class Element_, class ElementAccum_, class ArchTag_,
         bool Is_causal_, bool Is_local_, bool Has_softcap_, bool Varlen_, bool Deterministic,
         bool SdP_swapAB_, bool dKV_swapAB_, bool dQ_swapAB_,
         int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
-        bool Mma_dP_is_RS=false>
+        bool Mma_dP_is_RS=false, bool UseShiftScheduler=true>
 struct CollectiveMainloopBwdSm90 {
 
     static constexpr int kStages = Stages;
@@ -449,38 +451,42 @@ struct CollectiveMainloopBwdSm90 {
     CUTLASS_DEVICE
     static auto get_mblock_iter(int m_block_min, int m_block_max, cute::tuple<int32_t, int32_t, int32_t> block_coord, Params const& params) {
         auto [n_block, bidh, bidb] = block_coord;
-        if constexpr (Is_causal) {
-            int nheads = get<2>(params.shape_Q);
-            int kv_len = get<0>(params.shape_K);
-            int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
-            int num_sms = gridDim.x; // presistent kernel
-            auto [running_count, finished_count] = get_kv_status(
-                num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
-            );
-            int stage = n_block > n_blocks - 1 - n_block; // 0: big side, 1: small side
-            int stride = kBlockN / kBlockM;
-            int sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
-            
-            int global_m_min;
-            if (stage == 0) {
-                global_m_min = m_block_min - (sm_id * stride);
+        if constexpr (UseShiftScheduler) {
+            if constexpr (Is_causal) {
+                int nheads = get<2>(params.shape_Q);
+                int kv_len = get<0>(params.shape_K);
+                int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
+                int num_sms = gridDim.x; // presistent kernel
+                auto [running_count, finished_count] = get_kv_status(
+                    num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
+                );
+                int stage = n_block > n_blocks - 1 - n_block; // 0: big side, 1: small side
+                int stride = kBlockN / kBlockM;
+                int sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
+                
+                int global_m_min;
+                if (stage == 0) {
+                    global_m_min = m_block_min - (sm_id * stride);
+                } else {
+                    global_m_min = 0; // small side don't need this param
+                }
+
+                auto additional_vars = cute::make_tuple(running_count, finished_count, stride);
+
+                return cute::make_tuple(ShiftCausalScheduler(m_block_min, m_block_max, running_count, sm_id, stage, stride, global_m_min), additional_vars);
             } else {
-                global_m_min = 0; // small side don't need this param
+                int nheads = get<2>(params.shape_Q);
+                int kv_len = get<0>(params.shape_K);
+                int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
+                int num_sms = gridDim.x; // presistent kernel
+                auto [running_count, finished_count] = get_kv_status(
+                    num_sms, n_block, bidh, bidb, n_blocks, nheads
+                );
+                auto additional_vars = cute::make_tuple(running_count, finished_count);
+                return cute::make_tuple(ShiftScheduler(m_block_min, m_block_max, n_block - finished_count), additional_vars);
             }
-
-            auto additional_vars = cute::make_tuple(running_count, finished_count, stride);
-
-            return cute::make_tuple(ShiftCausalScheduler(m_block_min, m_block_max, running_count, sm_id, stage, stride, global_m_min), additional_vars);
         } else {
-            int nheads = get<2>(params.shape_Q);
-            int kv_len = get<0>(params.shape_K);
-            int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
-            int num_sms = gridDim.x; // presistent kernel
-            auto [running_count, finished_count] = get_kv_status(
-                num_sms, n_block, bidh, bidb, n_blocks, nheads
-            );
-            auto additional_vars = cute::make_tuple(running_count, finished_count);
-            return cute::make_tuple(ShiftScheduler(m_block_min, m_block_max, n_block - finished_count), additional_vars);
+            return cute::make_tuple(DescendingScheduler(m_block_min, m_block_max), cute::make_tuple());
         }
     }
 
@@ -718,6 +724,10 @@ struct CollectiveMainloopBwdSm90 {
                 } else if constexpr (std::is_same_v<decltype(m_block), ShiftScheduler>) {
                     auto [running_count, finished_count] = addition_vars;
                     wait_num = ShiftDependency()(*m_block, n_block - finished_count, running_count, finished_count);
+                } else if constexpr (std::is_same_v<decltype(m_block), DescendingScheduler> || std::is_same_v<decltype(m_block), AscendingScheduler>) {
+                    wait_num = NaiveDependency()(n_block);
+                } else {
+                    static_assert(always_false_v<decltype(m_block)>, "Unknown scheduler type");
                 }
                 // if (threadIdx.x % 32  == 0) {
                 //     printf("m_block: %d, wait_num: %d, blockidx: %d total kv: %d, m_min: %d, m_max: %d, block: (%d, %d, %d) running_kv: %d, finished_kv: %d\n", *m_block, wait_num, blockIdx.x, n_blocks, m_block_min, m_block_max, n_block, bidh, bidb, running_count, finished_count);
