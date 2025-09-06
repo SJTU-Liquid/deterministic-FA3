@@ -456,7 +456,7 @@ struct CollectiveMainloopBwdSm90 {
                 int nheads = get<2>(params.shape_Q);
                 int kv_len = get<0>(params.shape_K);
                 int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
-                int num_sms = gridDim.x; // presistent kernel
+                int num_sms = 132; // presistent kernel
                 auto [running_count, finished_count] = get_kv_status(
                     num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
                 );
@@ -478,7 +478,7 @@ struct CollectiveMainloopBwdSm90 {
                 int nheads = get<2>(params.shape_Q);
                 int kv_len = get<0>(params.shape_K);
                 int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
-                int num_sms = gridDim.x; // presistent kernel
+                int num_sms = 132; // presistent kernel
                 auto [running_count, finished_count] = get_kv_status(
                     num_sms, n_block, bidh, bidb, n_blocks, nheads
                 );
