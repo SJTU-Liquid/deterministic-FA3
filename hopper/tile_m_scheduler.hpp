@@ -78,9 +78,9 @@ namespace flash {
     // | 4    | 3    | 2    |
     class ShiftScheduler {
     public:
-        int cur_step;
-        const int start_q_idx;
-        const int total_steps;
+        short cur_step;
+        const short start_q_idx;
+        const short total_steps;
         
         using iterator_category = cuda::std::forward_iterator_tag;
         using value_type        = int;
@@ -104,7 +104,9 @@ namespace flash {
         }
 
         CUTLASS_DEVICE value_type operator*() const {
-            return (start_q_idx + cur_step) % total_steps; // wrap around
+            int tmp = start_q_idx + cur_step;
+            if (tmp >= total_steps) tmp -= total_steps;
+            return tmp; // wrap around
         }
     };
 
@@ -116,18 +118,17 @@ namespace flash {
         using pointer           = const int*;
         using reference         = const int&;
 
-        const int stage;
-        int cur_step;
-        const int total_steps;
-        const int m_max;
-        const int rectangle_start;
-        const int sm_id;
-        const int m_min;
-        CUTLASS_DEVICE ShiftCausalScheduler(int m_min, int m_max, int active_sms, int sm_id, int stage, int stride, int global_m_min)
-        : stage(stage), total_steps(m_max - m_min), cur_step(0), m_max(m_max), rectangle_start(global_m_min + stride * (active_sms - 1)), sm_id(sm_id), m_min(m_min) {}
+        const short stage;
+        short cur_step;
+        const short m_max;
+        const short rectangle_start;
+        const short sm_id;
+        const short m_min;
+        CUTLASS_DEVICE ShiftCausalScheduler(short m_min, short m_max, short active_sms, short sm_id, bool stage, short stride, short global_m_min)
+        : stage(stage), cur_step(0), m_max(m_max), rectangle_start(global_m_min + stride * (active_sms - 1)), sm_id(sm_id), m_min(m_min) {}
 
         CUTLASS_DEVICE bool valid() {
-            return cur_step < total_steps;
+            return cur_step < m_max - m_min;
         }
 
         CUTLASS_DEVICE ShiftCausalScheduler& operator++() {
@@ -141,9 +142,11 @@ namespace flash {
                 return m_max - cur_step - 1;
             } else {
                 // rotation in rectangle, forward in triangle
-                int rectangle_steps = m_max - rectangle_start;
+                short rectangle_steps = m_max - rectangle_start;
                 if (cur_step < rectangle_steps) {
-                    return (sm_id + cur_step) % rectangle_steps + rectangle_start;
+                    short pos = sm_id + cur_step;
+                    if (pos >= rectangle_steps) pos -= rectangle_steps;
+                    return pos + rectangle_start;
                 } else {
                     return m_min + (cur_step - rectangle_steps);
                 }

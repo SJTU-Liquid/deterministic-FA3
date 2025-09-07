@@ -96,9 +96,9 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     using Scheduler = std::conditional_t<
         Is_causal && !Varlen,
         // flash::SingleTileBwdLPTScheduler,
-        flash::CausalBwdChunkScheduler,
-        // flash::StaticPersistentTileScheduler<false /*Split*/>
-        flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>
+        flash::PersistentCausalBwdChunkScheduler,
+        flash::StaticPersistentTileScheduler<false /*Split*/>
+        // flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>
     >;
     using AttnKernel = std::conditional_t<
         Arch >= 90,

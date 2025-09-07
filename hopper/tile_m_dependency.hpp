@@ -34,19 +34,24 @@ namespace flash {
     // | 2    | 1    | 0    |
     class ShiftDependency {
     public:
-        CUTLASS_DEVICE int operator()(int q_id, int active_kv_id, int active_kv_tiles, int executed_kv_tiles) const {
-            int effective_row = min(q_id, active_kv_tiles - 1);
-            return executed_kv_tiles + (effective_row - active_kv_id + active_kv_tiles) % active_kv_tiles;
+        CUTLASS_DEVICE short operator()(short q_id, short active_kv_id, short active_kv_tiles, short executed_kv_tiles) const {
+            short effective_row = min(q_id, active_kv_tiles - 1);
+            short tmp = effective_row - active_kv_id;
+            if (tmp < 0) tmp += active_kv_tiles;
+            return executed_kv_tiles + tmp;
+            // return executed_kv_tiles + (effective_row - active_kv_id + active_kv_tiles) % active_kv_tiles;
         }
     };
 
     class ShiftCausalDependency {
     public:
-        CUTLASS_DEVICE int operator()(ShiftCausalScheduler const& scheduler, int active_sms, int executed_kvs, int stride) const {
+        CUTLASS_DEVICE short operator()(ShiftCausalScheduler const& scheduler, short active_sms, short executed_kvs, short stride) const {
             if (scheduler.stage == 0) {
-                int rectangle_steps = scheduler.m_max - scheduler.rectangle_start;
+                short rectangle_steps = scheduler.m_max - scheduler.rectangle_start;
                 if (scheduler.cur_step < rectangle_steps) {
-                    return ShiftDependency()((scheduler.sm_id + scheduler.cur_step) % rectangle_steps, scheduler.sm_id, active_sms, executed_kvs);
+                    short tmp = (scheduler.sm_id + scheduler.cur_step);
+                    if (tmp >= rectangle_steps) tmp -= rectangle_steps;
+                    return ShiftDependency()(tmp, scheduler.sm_id, active_sms, executed_kvs);
                 } else {
                     return (scheduler.cur_step - rectangle_steps) / stride + executed_kvs;
                 }

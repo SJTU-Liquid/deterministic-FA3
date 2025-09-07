@@ -418,23 +418,23 @@ struct CollectiveMainloopBwdSm90 {
     // calculate the kv tile status (for current head): how many kv tiles are active? how many done?
     // return: (running_count, finished_count)
     CUTLASS_DEVICE
-    static auto get_kv_status(int num_sms, int kv_id, int bidh, int bidb, int num_kv_tiles, int num_heads) {
-        int linear_id = kv_id + bidh * num_kv_tiles + bidb * num_kv_tiles * num_heads;
-        int wave_id = linear_id / num_sms;
+    static auto get_kv_status(short num_sms, short kv_id, short bidh, short bidb, short num_kv_tiles, short num_heads) {
+        short linear_id = kv_id + bidh * num_kv_tiles + bidb * num_kv_tiles * num_heads;
+        short wave_id = linear_id / num_sms;
 
         // start and end indices for the current head
-        int start_idx_my_head = bidh * num_kv_tiles + bidb * num_kv_tiles * num_heads;
-        int end_idx_my_head = start_idx_my_head + num_kv_tiles - 1;
+        short start_idx_my_head = bidh * num_kv_tiles + bidb * num_kv_tiles * num_heads;
+        short end_idx_my_head = start_idx_my_head + num_kv_tiles - 1;
 
         // start and end indices for the current wave
-        int start_idx_wave = wave_id * num_sms;
-        int end_idx_wave = start_idx_wave + num_sms - 1;
+        short start_idx_wave = wave_id * num_sms;
+        short end_idx_wave = start_idx_wave + num_sms - 1;
 
-        int intersection_start = max(start_idx_my_head, start_idx_wave);
-        int intersection_end = min(end_idx_my_head, end_idx_wave);
-        int running_count = max(0, intersection_end - intersection_start + 1);
+        short intersection_start = max(start_idx_my_head, start_idx_wave);
+        short intersection_end = min(end_idx_my_head, end_idx_wave);
+        short running_count = max(0, intersection_end - intersection_start + 1);
 
-        int finished_count = max(0, start_idx_wave - start_idx_my_head);
+        short finished_count = max(0, start_idx_wave - start_idx_my_head);
 
         return cute::make_tuple(running_count, finished_count);
     }
@@ -453,18 +453,18 @@ struct CollectiveMainloopBwdSm90 {
         auto [n_block, bidh, bidb] = block_coord;
         if constexpr (UseShiftScheduler) {
             if constexpr (Is_causal) {
-                int nheads = get<2>(params.shape_Q);
+                short nheads = get<2>(params.shape_Q);
                 int kv_len = get<0>(params.shape_K);
-                int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
-                int num_sms = 132; // presistent kernel
+                short n_blocks = (kv_len + kBlockN - 1) / kBlockN;
+                short num_sms = 132; // presistent kernel
                 auto [running_count, finished_count] = get_kv_status(
                     num_sms, min(n_block, n_blocks - 1 - n_block), bidh, bidb, n_blocks / 2, nheads
                 );
-                int stage = n_block > n_blocks - 1 - n_block; // 0: big side, 1: small side
-                int stride = kBlockN / kBlockM;
-                int sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
-                
-                int global_m_min;
+                bool stage = n_block > n_blocks - 1 - n_block; // 0: big side, 1: small side
+                short stride = kBlockN / kBlockM;
+                short sm_id = stage == 0 ? n_block - finished_count : n_blocks - 1 - n_block - finished_count;
+
+                short global_m_min;
                 if (stage == 0) {
                     global_m_min = m_block_min - (sm_id * stride);
                 } else {
@@ -475,10 +475,10 @@ struct CollectiveMainloopBwdSm90 {
 
                 return cute::make_tuple(ShiftCausalScheduler(m_block_min, m_block_max, running_count, sm_id, stage, stride, global_m_min), additional_vars);
             } else {
-                int nheads = get<2>(params.shape_Q);
+                short nheads = get<2>(params.shape_Q);
                 int kv_len = get<0>(params.shape_K);
-                int n_blocks = (kv_len + kBlockN - 1) / kBlockN;
-                int num_sms = 132; // presistent kernel
+                short n_blocks = (kv_len + kBlockN - 1) / kBlockN;
+                short num_sms = 132; // presistent kernel
                 auto [running_count, finished_count] = get_kv_status(
                     num_sms, n_block, bidh, bidb, n_blocks, nheads
                 );
@@ -499,8 +499,7 @@ struct CollectiveMainloopBwdSm90 {
          PipelineState_dO& smem_pipe_write_do,
          SharedStorage &shared_storage,
          SchedulerPrefetch const& scheduler_prefetch,
-         cute::tuple<int32_t, int32_t, int32_t> block_coord,
-         int num_sms = 132
+         cute::tuple<int32_t, int32_t, int32_t> block_coord
          ) {
 
         auto [n_block, bidh, bidb] = block_coord;
@@ -667,8 +666,7 @@ struct CollectiveMainloopBwdSm90 {
     CUTLASS_DEVICE void
     store_dq(Params const& params,
              SharedStorage &shared_storage,
-             cute::tuple<int32_t, int32_t, int32_t> block_coord,
-             int num_sms = 132
+             cute::tuple<int32_t, int32_t, int32_t> block_coord
              ) {
         if constexpr (!dQacc_use_TMA) { return; }
 
@@ -779,8 +777,7 @@ struct CollectiveMainloopBwdSm90 {
         int thread_idx,
         int &work_idx,
         cute::tuple<int32_t, int32_t, int32_t> block_coord,
-        SharedStorage& shared_storage,
-        int num_sms = 132
+        SharedStorage& shared_storage
         ) {
         static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
