@@ -1,3 +1,22 @@
+# deterministic-FA3 (DASH / ICLR 2026)
+
+This repository is a fork of FlashAttention with additional commits implementing and experimenting with deterministic FlashAttention-3 backward scheduling strategies from the paper:
+
+**DASH: Deterministic Attention Scheduling for High-Throughput Reproducible LLM Training (ICLR 2026)**
+
+## Status
+This codebase is primarily for research / development. It currently does not provide a stable user-facing switch or turnkey script to enable/compare schedulers.
+
+## What’s in this fork
+- Deterministic FA3 backward scheduling experiments (Hopper / sm90 focus)
+- Implementations of multiple schedulers explored in the paper (e.g., shift / symmetric variants), kept here for completeness and comparison
+
+## Where to look
+- Scheduler logic: `hopper/tile_m_scheduler.hpp` (and related headers)
+- Backward mainloop integration: `hopper/mainloop_bwd_sm90_tma_gmma_ws.hpp` (sm90 bwd path)
+
+Below is the original README from FlashAttention.
+
 # FlashAttention
 This repository provides the official implementation of FlashAttention and
 FlashAttention-2 from the
