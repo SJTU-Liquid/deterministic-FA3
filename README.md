@@ -2,7 +2,7 @@
 
 This repository is a fork of FlashAttention with additional commits implementing and experimenting with deterministic FlashAttention-3 backward scheduling strategies from the paper:
 
-**DASH: Deterministic Attention Scheduling for High-throughput Reproducible LLM Training (ICLR 2026)**
+[DASH: Deterministic Attention Scheduling for High-throughput Reproducible LLM Training (ICLR 2026)](https://arxiv.org/abs/2601.21824)
 
 ## Status
 This codebase is primarily for research / development. It currently does not provide a stable user-facing switch or turnkey script to enable/compare schedulers.
