@@ -21,13 +21,12 @@ https://github.com/Dao-AILab/flash-attention
 
 ## Citation
 ```bibtex
-@misc{qiang2026dashdeterministicattentionscheduling,
-      title={DASH: Deterministic Attention Scheduling for High-throughput Reproducible LLM Training},
-      author={Xinwei Qiang and Hongmin Chen and Shixuan Sun and Jingwen Leng and Xin Liu and Minyi Guo},
-      year={2026},
-      eprint={2601.21824},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2601.21824},
+@inproceedings{
+qiang2026dash,
+title={{DASH}: Deterministic Attention Scheduling for High-throughput Reproducible {LLM} Training},
+author={Xinwei Qiang and Hongmin Chen and Shixuan Sun and Jingwen Leng and Xin Liu and Minyi Guo},
+booktitle={The Fourteenth International Conference on Learning Representations},
+year={2026},
+url={https://openreview.net/forum?id=bMi5ssfPoM}
 }
 ```
